@@ -1,7 +1,7 @@
 # Hildebrand Glow (Bright App) Integration for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/v/release/xmcdanx/hildebrand-glow-ha)](https://github.com/xmcdanx/hildebrand-glow-ha/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/McDon22/hildebrand-glow-ha)](https://github.com/McDon22/hildebrand-glow-ha/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Home Assistant custom integration for UK SMETS2 smart meters using the Hildebrand Glow / Bright app API.
@@ -39,13 +39,13 @@ A Home Assistant custom integration for UK SMETS2 smart meters using the Hildebr
 
 1. Open HACS in Home Assistant
 2. Click the three dots menu → **Custom repositories**
-3. Add `https://github.com/xmcdanx/hildebrand-glow-ha` as an **Integration**
+3. Add `https://github.com/McDon22/hildebrand-glow-ha` as an **Integration**
 4. Search for "Hildebrand Glow" and click **Download**
 5. Restart Home Assistant
 
 ### Manual Installation
 
-1. Download the latest release from [GitHub](https://github.com/xmcdanx/hildebrand-glow-ha/releases)
+1. Download the latest release from [GitHub](https://github.com/McDon22/hildebrand-glow-ha/releases)
 2. Extract and copy the `custom_components/hildebrand_glow` folder to your Home Assistant `config/custom_components/` directory
 3. Restart Home Assistant
 
