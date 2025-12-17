@@ -17,26 +17,49 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api_client = api_client
         self.tariff_config = tariff_config
         self._resources: dict[str, dict[str, Any]] = {}
+        self._last_readings: dict[str, float] = {}  # Cache last known good readings
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if not self._resources:
                 self._resources = await self.api_client.discover_resources()
+            
             readings = await self.api_client.get_all_readings()
-            data: dict[str, Any] = {"readings": readings, "resources": self._resources, "costs": {}}
-            elec = readings.get("electricity.consumption")
+            
+            # Merge with cached readings - only update if we got valid data
+            for key, value in readings.items():
+                if value is not None:
+                    self._last_readings[key] = value
+                    _LOGGER.debug("Updated %s to %.3f", key, value)
+                elif key in self._last_readings:
+                    _LOGGER.debug("Keeping cached value for %s: %.3f (API returned None)", 
+                        key, self._last_readings[key])
+            
+            # Use cached readings for the data
+            merged_readings = {k: self._last_readings.get(k) for k in readings.keys()}
+            
+            data: dict[str, Any] = {"readings": merged_readings, "resources": self._resources, "costs": {}}
+            
+            elec = merged_readings.get("electricity.consumption")
             if elec is not None:
                 elec_rate = self.tariff_config.get("electricity_rate", 0)
                 elec_standing = self.tariff_config.get("electricity_standing_charge", 0)
                 data["costs"]["electricity"] = round((elec * elec_rate) + elec_standing, 2)
-            gas = readings.get("gas.consumption")
+            
+            gas = merged_readings.get("gas.consumption")
             if gas is not None:
                 gas_rate = self.tariff_config.get("gas_rate", 0)
                 gas_standing = self.tariff_config.get("gas_standing_charge", 0)
                 data["costs"]["gas"] = round((gas * gas_rate) + gas_standing, 2)
+            
             data["costs"]["total"] = round(data["costs"].get("electricity", 0) + data["costs"].get("gas", 0), 2)
-            data["costs"]["standing_charges_total"] = round(self.tariff_config.get("electricity_standing_charge", 0) + self.tariff_config.get("gas_standing_charge", 0), 2)
+            data["costs"]["standing_charges_total"] = round(
+                self.tariff_config.get("electricity_standing_charge", 0) + 
+                self.tariff_config.get("gas_standing_charge", 0), 2
+            )
+            
             return data
+            
         except GlowmarktAuthError as err:
             raise UpdateFailed(f"Authentication error: {err}") from err
         except GlowmarktApiError as err:
@@ -48,3 +71,8 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def update_tariff_config(self, tariff_config: dict[str, float]) -> None:
         self.tariff_config = tariff_config
+    
+    def clear_daily_cache(self) -> None:
+        """Clear the cached readings (call at midnight)."""
+        self._last_readings.clear()
+        _LOGGER.debug("Cleared daily reading cache")
