@@ -69,16 +69,22 @@ class GlowmarktApiClient:
         except ClientError as err:
             raise GlowmarktApiError(f"Failed to get virtual entities: {err}") from err
 
-    async def discover_resources(self) -> dict[str, dict[str, Any]]:
+    async def discover_resources(self, virtual_entity_id: str | None = None) -> dict[str, dict[str, Any]]:
+        """Discover resources for a specific virtual entity, or all if not specified."""
         await self._ensure_authenticated()
-        virtual_entities = await self.get_virtual_entities()
-        if not virtual_entities:
-            return {}
+        
+        if virtual_entity_id:
+            # Use specific virtual entity
+            ve_ids = [virtual_entity_id]
+        else:
+            # Get all virtual entities
+            virtual_entities = await self.get_virtual_entities()
+            if not virtual_entities:
+                return {}
+            ve_ids = [ve.get("veId") for ve in virtual_entities if ve.get("veId")]
+        
         self._resources = {}
-        for ve in virtual_entities:
-            ve_id = ve.get("veId")
-            if not ve_id:
-                continue
+        for ve_id in ve_ids:
             self._virtual_entity_id = ve_id
             try:
                 async with self._session.get(f"{GLOWMARKT_API_BASE}/virtualentity/{ve_id}/resources", headers=self._get_headers()) as response:

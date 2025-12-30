@@ -4,22 +4,42 @@
       "user": {
         "title": "Hildebrand Glow Account",
         "description": "Enter your Hildebrand Bright app credentials.",
-        "data": {"username": "Email Address", "password": "Password"}
+        "data": { "username": "Email Address", "password": "Password" }
+      },
+      "select_entity": {
+        "title": "Select Your Meter",
+        "description": "We found multiple meter sites linked to your account. You can rename sites from settings in the Bright app. Please select the one you'd like to monitor:",
+        "data": { "virtual_entity_id": "Select a location" }
       },
       "tariff": {
         "title": "Energy Tariff Configuration",
         "description": "Enter your energy tariff rates. These can be changed later.",
-        "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
+        "data": {
+          "electricity_rate": "Electricity Rate (£/kWh)",
+          "electricity_standing_charge": "Electricity Standing Charge (£/day)",
+          "gas_rate": "Gas Rate (£/kWh)",
+          "gas_standing_charge": "Gas Standing Charge (£/day)"
+        }
       }
     },
-    "error": {"invalid_auth": "Invalid username or password.", "cannot_connect": "Unable to connect to the Glowmarkt API.", "no_resources": "No smart meter resources found.", "unknown": "An unexpected error occurred."},
-    "abort": {"already_configured": "This account is already configured."}
+    "error": {
+      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Unable to connect to the Glowmarkt API.",
+      "no_resources": "No smart meter resources found for this location.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": { "already_configured": "This account is already configured." }
   },
   "options": {
     "step": {
       "init": {
         "title": "Update Tariff Configuration",
-        "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
+        "data": {
+          "electricity_rate": "Electricity Rate (£/kWh)",
+          "electricity_standing_charge": "Electricity Standing Charge (£/day)",
+          "gas_rate": "Gas Rate (£/kWh)",
+          "gas_standing_charge": "Gas Standing Charge (£/day)"
+        }
       }
     }
   }

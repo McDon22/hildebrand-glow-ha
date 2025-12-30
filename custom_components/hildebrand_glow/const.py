@@ -7,6 +7,7 @@ DOMAIN: Final = "hildebrand_glow"
 GLOWMARKT_API_BASE: Final = "https://api.glowmarkt.com/api/v0-1"
 GLOWMARKT_APP_ID: Final = "b0f1b774-a586-4f72-9edd-27ead8aa7a8d"
 CONF_APP_ID: Final = "app_id"
+CONF_VIRTUAL_ENTITY: Final = "virtual_entity_id"
 DEFAULT_SCAN_INTERVAL: Final = timedelta(minutes=5)
 DEFAULT_ELECTRICITY_RATE: Final = 0.245
 DEFAULT_GAS_RATE: Final = 0.065

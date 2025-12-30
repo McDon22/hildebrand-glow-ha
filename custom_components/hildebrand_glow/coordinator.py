@@ -12,17 +12,24 @@ _LOGGER = logging.getLogger(__name__)
 class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Glowmarkt data."""
 
-    def __init__(self, hass: HomeAssistant, api_client: GlowmarktApiClient, tariff_config: dict[str, float]) -> None:
+    def __init__(
+        self, 
+        hass: HomeAssistant, 
+        api_client: GlowmarktApiClient, 
+        tariff_config: dict[str, float],
+        virtual_entity_id: str | None = None
+    ) -> None:
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=DEFAULT_SCAN_INTERVAL)
         self.api_client = api_client
         self.tariff_config = tariff_config
+        self._virtual_entity_id = virtual_entity_id
         self._resources: dict[str, dict[str, Any]] = {}
         self._last_readings: dict[str, float] = {}  # Cache last known good readings
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if not self._resources:
-                self._resources = await self.api_client.discover_resources()
+                self._resources = await self.api_client.discover_resources(self._virtual_entity_id)
             
             readings = await self.api_client.get_all_readings()
             
