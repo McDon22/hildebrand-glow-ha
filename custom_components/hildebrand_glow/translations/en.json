@@ -3,28 +3,11 @@
     "step": {
       "user": {
         "title": "Hildebrand Glow Account",
-        "description": "Enter your Hildebrand Bright app credentials.",
+        "description": "Enter your Hildebrand Bright app credentials. Tariff rates will be fetched automatically from your account.",
         "data": {"username": "Email Address", "password": "Password"}
-      },
-      "tariff": {
-        "title": "Tariff for {meter_name}",
-        "description": "Enter the energy tariff rates for {meter_name}. These can be changed later.",
-        "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
       }
     },
     "error": {"invalid_auth": "Invalid username or password.", "cannot_connect": "Unable to connect to the Glowmarkt API.", "no_resources": "No smart meter resources found.", "unknown": "An unexpected error occurred."},
     "abort": {"already_configured": "This account is already configured."}
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Update Tariff Configuration"
-      },
-      "tariff": {
-        "title": "Tariff for {meter_name}",
-        "description": "Update the energy tariff rates for {meter_name}.",
-        "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
-      }
-    }
   }
 }

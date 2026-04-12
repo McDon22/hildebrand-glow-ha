@@ -179,6 +179,45 @@ class GlowmarktApiClient:
                 readings[ve_id][classifier] = await self.get_daily_reading(resource["resource_id"])
         return readings
 
+    async def get_tariff(self, resource_id: str) -> dict[str, float | None]:
+        """Get current tariff for a resource. Returns rate and standing_charge in pence."""
+        await self._ensure_authenticated()
+        try:
+            async with self._session.get(
+                f"{GLOWMARKT_API_BASE}/resource/{resource_id}/tariff",
+                headers=self._get_headers()
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                current = data.get("current_rates", {})
+                rate_obj = current.get("rate", {})
+                standing_obj = current.get("standing_charge", {})
+                # API may return {"value": X, "units": "pence"} or a bare number
+                rate = rate_obj.get("value") if isinstance(rate_obj, dict) else rate_obj
+                standing = standing_obj.get("value") if isinstance(standing_obj, dict) else standing_obj
+                _LOGGER.debug("Tariff for %s: rate=%s p, standing=%s p", resource_id, rate, standing)
+                return {
+                    "rate": float(rate) if rate is not None else None,
+                    "standing_charge": float(standing) if standing is not None else None,
+                }
+        except ClientResponseError as err:
+            _LOGGER.warning("Could not fetch tariff for %s: %s %s", resource_id, err.status, err.message)
+            return {"rate": None, "standing_charge": None}
+        except ClientError as err:
+            _LOGGER.warning("Connection error fetching tariff for %s: %s", resource_id, err)
+            return {"rate": None, "standing_charge": None}
+
+    async def get_all_tariffs(self) -> dict[str, dict[str, dict[str, float | None]]]:
+        """Fetch tariffs for all resources. Returns {ve_id: {classifier: {rate, standing_charge}}}."""
+        if not self._resources:
+            await self.discover_resources()
+        tariffs: dict[str, dict[str, dict[str, float | None]]] = {}
+        for ve_id, ve_resources in self._resources.items():
+            tariffs[ve_id] = {}
+            for classifier, resource in ve_resources.items():
+                tariffs[ve_id][classifier] = await self.get_tariff(resource["resource_id"])
+        return tariffs
+
     @property
     def resources(self) -> dict[str, dict[str, dict[str, Any]]]:
         return self._resources
