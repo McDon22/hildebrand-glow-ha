@@ -28,8 +28,8 @@ class GlowmarktApiClient:
         self._session = session
         self._token: str | None = None
         self._token_expiry: datetime | None = None
-        self._virtual_entity_id: str | None = None
-        self._resources: dict[str, dict[str, Any]] = {}
+        self._resources: dict[str, dict[str, dict[str, Any]]] = {}  # {ve_id: {classifier: resource_info}}
+        self._ve_names: dict[str, str] = {}  # {ve_id: ve_name}
 
     async def authenticate(self) -> bool:
         headers = {"Content-Type": "application/json", "applicationId": GLOWMARKT_APP_ID}
@@ -69,17 +69,20 @@ class GlowmarktApiClient:
         except ClientError as err:
             raise GlowmarktApiError(f"Failed to get virtual entities: {err}") from err
 
-    async def discover_resources(self) -> dict[str, dict[str, Any]]:
+    async def discover_resources(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Discover resources per virtual entity. Returns {ve_id: {classifier: resource_info}}."""
         await self._ensure_authenticated()
         virtual_entities = await self.get_virtual_entities()
         if not virtual_entities:
             return {}
         self._resources = {}
+        self._ve_names = {}
         for ve in virtual_entities:
             ve_id = ve.get("veId")
             if not ve_id:
                 continue
-            self._virtual_entity_id = ve_id
+            self._ve_names[ve_id] = ve.get("name", ve_id)
+            self._resources[ve_id] = {}
             try:
                 async with self._session.get(f"{GLOWMARKT_API_BASE}/virtualentity/{ve_id}/resources", headers=self._get_headers()) as response:
                     response.raise_for_status()
@@ -89,8 +92,8 @@ class GlowmarktApiClient:
                         resource_id = resource.get("resourceId")
                         classifier = resource.get("classifier")
                         if resource_id and classifier:
-                            self._resources[classifier] = {"resource_id": resource_id, "name": resource.get("name", classifier), "classifier": classifier, "base_unit": resource.get("baseUnit", "")}
-                            _LOGGER.debug("Found resource: %s (%s)", classifier, resource_id)
+                            self._resources[ve_id][classifier] = {"resource_id": resource_id, "name": resource.get("name", classifier), "classifier": classifier, "base_unit": resource.get("baseUnit", "")}
+                            _LOGGER.debug("Found resource: %s (%s) for VE %s", classifier, resource_id, ve_id)
             except ClientError as err:
                 _LOGGER.error("Failed to get resources for %s: %s", ve_id, err)
         return self._resources
@@ -165,22 +168,29 @@ class GlowmarktApiClient:
             _LOGGER.error("Failed to get reading for %s: %s", resource_id, err)
             return None
 
-    async def get_all_readings(self) -> dict[str, float | None]:
+    async def get_all_readings(self) -> dict[str, dict[str, float | None]]:
+        """Fetch readings for all VEs. Returns {ve_id: {classifier: value}}."""
         if not self._resources:
             await self.discover_resources()
-        readings = {}
-        for classifier, resource in self._resources.items():
-            readings[classifier] = await self.get_daily_reading(resource["resource_id"])
+        readings: dict[str, dict[str, float | None]] = {}
+        for ve_id, ve_resources in self._resources.items():
+            readings[ve_id] = {}
+            for classifier, resource in ve_resources.items():
+                readings[ve_id][classifier] = await self.get_daily_reading(resource["resource_id"])
         return readings
 
     @property
-    def resources(self) -> dict[str, dict[str, Any]]:
+    def resources(self) -> dict[str, dict[str, dict[str, Any]]]:
         return self._resources
+
+    @property
+    def ve_names(self) -> dict[str, str]:
+        return self._ve_names
 
     async def test_connection(self) -> bool:
         try:
             await self.authenticate()
             await self.discover_resources()
-            return len(self._resources) > 0
+            return any(len(ve_resources) > 0 for ve_resources in self._resources.values())
         except (GlowmarktAuthError, GlowmarktApiError):
             return False

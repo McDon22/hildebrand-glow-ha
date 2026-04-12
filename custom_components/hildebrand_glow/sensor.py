@@ -27,36 +27,51 @@ SENSOR_DESCRIPTIONS: dict[str, dict[str, Any]] = {
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: GlowmarktDataUpdateCoordinator = hass.data[DOMAIN][config_entry.entry_id]
-    entities: list[GlowmarktSensor] = []
     await coordinator.async_config_entry_first_refresh()
-    for sensor_key, description in SENSOR_DESCRIPTIONS.items():
-        entities.append(GlowmarktSensor(coordinator=coordinator, sensor_key=sensor_key, description=description, entry_id=config_entry.entry_id))
+    entities: list[GlowmarktSensor] = []
+    meters = coordinator.data.get("meters", {})
+    for ve_id, meter_data in meters.items():
+        ve_resources = meter_data.get("readings", {})
+        for sensor_key, description in SENSOR_DESCRIPTIONS.items():
+            # For reading-based sensors, skip if the meter doesn't have that classifier
+            if description.get("data_key") == "readings" and description.get("reading_key") not in ve_resources:
+                continue
+            entities.append(GlowmarktSensor(
+                coordinator=coordinator,
+                ve_id=ve_id,
+                sensor_key=sensor_key,
+                description=description,
+                entry_id=config_entry.entry_id,
+            ))
     async_add_entities(entities)
 
 class GlowmarktSensor(CoordinatorEntity[GlowmarktDataUpdateCoordinator], SensorEntity):
     _attr_attribution = ATTRIBUTION
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: GlowmarktDataUpdateCoordinator, sensor_key: str, description: dict[str, Any], entry_id: str) -> None:
+    def __init__(self, coordinator: GlowmarktDataUpdateCoordinator, ve_id: str, sensor_key: str, description: dict[str, Any], entry_id: str) -> None:
         super().__init__(coordinator)
+        self._ve_id = ve_id
         self._sensor_key = sensor_key
         self._description = description
-        self._attr_unique_id = f"{entry_id}_{sensor_key}"
+        self._attr_unique_id = f"{entry_id}_{ve_id}_{sensor_key}"
         self._attr_name = description["name"]
         self._attr_icon = description.get("icon")
         self._attr_device_class = description.get("device_class")
         self._attr_state_class = description.get("state_class")
         self._attr_native_unit_of_measurement = description.get("native_unit_of_measurement")
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)}, name="Smart Meter", manufacturer="Hildebrand Technology", model="SMETS2 via Glow/Bright", configuration_url="https://glowmarkt.com/")
+        # Each VE gets its own device so sensors are grouped per meter
+        meter_name = coordinator.data.get("meters", {}).get(ve_id, {}).get("name", "Smart Meter")
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, f"{entry_id}_{ve_id}")}, name=meter_name, manufacturer="Hildebrand Technology", model="SMETS2 via Glow/Bright", configuration_url="https://glowmarkt.com/")
 
     @property
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
+        meter_data = self.coordinator.data.get("meters", {}).get(self._ve_id, {})
         data_key = self._description.get("data_key", "readings")
         reading_key = self._description.get("reading_key", "")
-        data_section = self.coordinator.data.get(data_key, {})
-        value = data_section.get(reading_key)
+        value = meter_data.get(data_key, {}).get(reading_key)
         if value is None:
             return None
         if self._description.get("convert_pence", False):

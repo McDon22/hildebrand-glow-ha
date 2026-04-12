@@ -16,62 +16,72 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=DEFAULT_SCAN_INTERVAL)
         self.api_client = api_client
         self.tariff_config = tariff_config
-        self._resources: dict[str, dict[str, Any]] = {}
-        self._last_readings: dict[str, float] = {}  # Cache last known good readings
+        self._resources: dict[str, dict[str, dict[str, Any]]] = {}  # {ve_id: {classifier: resource_info}}
+        self._last_readings: dict[str, dict[str, float]] = {}  # {ve_id: {classifier: value}}
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if not self._resources:
                 self._resources = await self.api_client.discover_resources()
-            
-            readings = await self.api_client.get_all_readings()
-            
-            # Merge with cached readings - only update if we got valid data
-            for key, value in readings.items():
-                if value is not None:
-                    self._last_readings[key] = value
-                    _LOGGER.debug("Updated %s to %.3f", key, value)
-                elif key in self._last_readings:
-                    _LOGGER.debug("Keeping cached value for %s: %.3f (API returned None)", 
-                        key, self._last_readings[key])
-            
-            # Use cached readings for the data
-            merged_readings = {k: self._last_readings.get(k) for k in readings.keys()}
-            
-            data: dict[str, Any] = {"readings": merged_readings, "resources": self._resources, "costs": {}}
-            
-            elec = merged_readings.get("electricity.consumption")
-            if elec is not None:
-                elec_rate = self.tariff_config.get("electricity_rate", 0)
-                elec_standing = self.tariff_config.get("electricity_standing_charge", 0)
-                data["costs"]["electricity"] = round((elec * elec_rate) + elec_standing, 2)
-            
-            gas = merged_readings.get("gas.consumption")
-            if gas is not None:
-                gas_rate = self.tariff_config.get("gas_rate", 0)
-                gas_standing = self.tariff_config.get("gas_standing_charge", 0)
-                data["costs"]["gas"] = round((gas * gas_rate) + gas_standing, 2)
-            
-            data["costs"]["total"] = round(data["costs"].get("electricity", 0) + data["costs"].get("gas", 0), 2)
-            data["costs"]["standing_charges_total"] = round(
-                self.tariff_config.get("electricity_standing_charge", 0) + 
-                self.tariff_config.get("gas_standing_charge", 0), 2
-            )
-            
-            return data
-            
+
+            readings_by_ve = await self.api_client.get_all_readings()
+
+            # Merge with per-VE cache — only update if we got valid data
+            for ve_id, readings in readings_by_ve.items():
+                if ve_id not in self._last_readings:
+                    self._last_readings[ve_id] = {}
+                for key, value in readings.items():
+                    if value is not None:
+                        self._last_readings[ve_id][key] = value
+                        _LOGGER.debug("Updated %s/%s to %.3f", ve_id, key, value)
+                    elif key in self._last_readings[ve_id]:
+                        _LOGGER.debug("Keeping cached value for %s/%s: %.3f (API returned None)",
+                            ve_id, key, self._last_readings[ve_id][key])
+
+            # Build per-meter data
+            meters: dict[str, Any] = {}
+            for ve_id, ve_resources in self._resources.items():
+                merged = {k: self._last_readings.get(ve_id, {}).get(k) for k in ve_resources}
+                costs: dict[str, float] = {}
+
+                elec = merged.get("electricity.consumption")
+                if elec is not None:
+                    elec_rate = self.tariff_config.get("electricity_rate", 0)
+                    elec_standing = self.tariff_config.get("electricity_standing_charge", 0)
+                    costs["electricity"] = round((elec * elec_rate) + elec_standing, 2)
+
+                gas = merged.get("gas.consumption")
+                if gas is not None:
+                    gas_rate = self.tariff_config.get("gas_rate", 0)
+                    gas_standing = self.tariff_config.get("gas_standing_charge", 0)
+                    costs["gas"] = round((gas * gas_rate) + gas_standing, 2)
+
+                costs["total"] = round(costs.get("electricity", 0) + costs.get("gas", 0), 2)
+                costs["standing_charges_total"] = round(
+                    self.tariff_config.get("electricity_standing_charge", 0) +
+                    self.tariff_config.get("gas_standing_charge", 0), 2
+                )
+
+                meters[ve_id] = {
+                    "name": self.api_client.ve_names.get(ve_id, ve_id),
+                    "readings": merged,
+                    "costs": costs,
+                }
+
+            return {"meters": meters, "resources": self._resources}
+
         except GlowmarktAuthError as err:
             raise UpdateFailed(f"Authentication error: {err}") from err
         except GlowmarktApiError as err:
             raise UpdateFailed(f"API error: {err}") from err
 
     @property
-    def resources(self) -> dict[str, dict[str, Any]]:
+    def resources(self) -> dict[str, dict[str, dict[str, Any]]]:
         return self._resources
 
     def update_tariff_config(self, tariff_config: dict[str, float]) -> None:
         self.tariff_config = tariff_config
-    
+
     def clear_daily_cache(self) -> None:
         """Clear the cached readings (call at midnight)."""
         self._last_readings.clear()
