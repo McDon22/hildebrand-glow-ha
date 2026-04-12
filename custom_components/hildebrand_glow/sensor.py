@@ -30,17 +30,26 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
     await coordinator.async_config_entry_first_refresh()
     entities: list[GlowmarktSensor] = []
     meters = coordinator.data.get("meters", {})
+    ve_resources_map = coordinator.resources  # {ve_id: {classifier: resource_info}}
     for ve_id, meter_data in meters.items():
-        ve_resources = meter_data.get("readings", {})
+        ve_readings = meter_data.get("readings", {})
         for sensor_key, description in SENSOR_DESCRIPTIONS.items():
+            reading_key = description.get("reading_key", "")
             # For reading-based sensors, skip if the meter doesn't have that classifier
-            if description.get("data_key") == "readings" and description.get("reading_key") not in ve_resources:
+            if description.get("data_key") == "readings" and reading_key not in ve_readings:
                 continue
+            # Use the API resource name for reading-based sensors
+            api_name = (
+                ve_resources_map.get(ve_id, {}).get(reading_key, {}).get("name")
+                if description.get("data_key") == "readings"
+                else None
+            )
+            resolved_description = {**description, "name": api_name or description["name"]}
             entities.append(GlowmarktSensor(
                 coordinator=coordinator,
                 ve_id=ve_id,
                 sensor_key=sensor_key,
-                description=description,
+                description=resolved_description,
                 entry_id=config_entry.entry_id,
             ))
     async_add_entities(entities)
