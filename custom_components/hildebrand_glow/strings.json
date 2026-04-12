@@ -7,8 +7,8 @@
         "data": {"username": "Email Address", "password": "Password"}
       },
       "tariff": {
-        "title": "Energy Tariff Configuration",
-        "description": "Enter your energy tariff rates. These can be changed later.",
+        "title": "Tariff for {meter_name}",
+        "description": "Enter the energy tariff rates for {meter_name}. These can be changed later.",
         "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
       }
     },
@@ -18,7 +18,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Update Tariff Configuration",
+        "title": "Update Tariff Configuration"
+      },
+      "tariff": {
+        "title": "Tariff for {meter_name}",
+        "description": "Update the energy tariff rates for {meter_name}.",
         "data": {"electricity_rate": "Electricity Rate (£/kWh)", "electricity_standing_charge": "Electricity Standing Charge (£/day)", "gas_rate": "Gas Rate (£/kWh)", "gas_standing_charge": "Gas Standing Charge (£/day)"}
       }
     }

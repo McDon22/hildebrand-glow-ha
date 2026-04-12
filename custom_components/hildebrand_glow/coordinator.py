@@ -5,17 +5,17 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .api import GlowmarktApiClient, GlowmarktApiError, GlowmarktAuthError
-from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
+from .const import DOMAIN, DEFAULT_SCAN_INTERVAL, CONF_ELECTRICITY_RATE, CONF_GAS_RATE, CONF_ELECTRICITY_STANDING_CHARGE, CONF_GAS_STANDING_CHARGE
 
 _LOGGER = logging.getLogger(__name__)
 
 class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Glowmarkt data."""
 
-    def __init__(self, hass: HomeAssistant, api_client: GlowmarktApiClient, tariff_config: dict[str, float]) -> None:
+    def __init__(self, hass: HomeAssistant, api_client: GlowmarktApiClient, tariff_config: dict[str, dict[str, float]]) -> None:
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=DEFAULT_SCAN_INTERVAL)
         self.api_client = api_client
-        self.tariff_config = tariff_config
+        self.tariff_config = tariff_config  # {ve_id: {rate_keys}} or {"_legacy": {rate_keys}}
         self._resources: dict[str, dict[str, dict[str, Any]]] = {}  # {ve_id: {classifier: resource_info}}
         self._last_readings: dict[str, dict[str, float]] = {}  # {ve_id: {classifier: value}}
 
@@ -42,24 +42,26 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             meters: dict[str, Any] = {}
             for ve_id, ve_resources in self._resources.items():
                 merged = {k: self._last_readings.get(ve_id, {}).get(k) for k in ve_resources}
+                # Per-VE tariff, falling back to legacy single-tariff for old installs
+                tariff = self.tariff_config.get(ve_id) or self.tariff_config.get("_legacy", {})
                 costs: dict[str, float] = {}
 
                 elec = merged.get("electricity.consumption")
                 if elec is not None:
-                    elec_rate = self.tariff_config.get("electricity_rate", 0)
-                    elec_standing = self.tariff_config.get("electricity_standing_charge", 0)
+                    elec_rate = tariff.get(CONF_ELECTRICITY_RATE, 0)
+                    elec_standing = tariff.get(CONF_ELECTRICITY_STANDING_CHARGE, 0)
                     costs["electricity"] = round((elec * elec_rate) + elec_standing, 2)
 
                 gas = merged.get("gas.consumption")
                 if gas is not None:
-                    gas_rate = self.tariff_config.get("gas_rate", 0)
-                    gas_standing = self.tariff_config.get("gas_standing_charge", 0)
+                    gas_rate = tariff.get(CONF_GAS_RATE, 0)
+                    gas_standing = tariff.get(CONF_GAS_STANDING_CHARGE, 0)
                     costs["gas"] = round((gas * gas_rate) + gas_standing, 2)
 
                 costs["total"] = round(costs.get("electricity", 0) + costs.get("gas", 0), 2)
                 costs["standing_charges_total"] = round(
-                    self.tariff_config.get("electricity_standing_charge", 0) +
-                    self.tariff_config.get("gas_standing_charge", 0), 2
+                    tariff.get(CONF_ELECTRICITY_STANDING_CHARGE, 0) +
+                    tariff.get(CONF_GAS_STANDING_CHARGE, 0), 2
                 )
 
                 meters[ve_id] = {
@@ -79,7 +81,7 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def resources(self) -> dict[str, dict[str, dict[str, Any]]]:
         return self._resources
 
-    def update_tariff_config(self, tariff_config: dict[str, float]) -> None:
+    def update_tariff_config(self, tariff_config: dict[str, dict[str, float]]) -> None:
         self.tariff_config = tariff_config
 
     def clear_daily_cache(self) -> None:
