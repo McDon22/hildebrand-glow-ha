@@ -22,7 +22,7 @@ SENSOR_DESCRIPTIONS: dict[str, dict[str, Any]] = {
     "electricity_daily_cost": {"name": "Electricity Daily Cost", "icon": "mdi:currency-gbp", "device_class": SensorDeviceClass.MONETARY, "state_class": SensorStateClass.TOTAL, "native_unit_of_measurement": "GBP", "data_key": "costs", "reading_key": "electricity"},
     "gas_daily_cost": {"name": "Gas Daily Cost", "icon": "mdi:currency-gbp", "device_class": SensorDeviceClass.MONETARY, "state_class": SensorStateClass.TOTAL, "native_unit_of_measurement": "GBP", "data_key": "costs", "reading_key": "gas"},
     "total_daily_cost": {"name": "Total Daily Energy Cost", "icon": "mdi:currency-gbp", "device_class": SensorDeviceClass.MONETARY, "state_class": SensorStateClass.TOTAL, "native_unit_of_measurement": "GBP", "data_key": "costs", "reading_key": "total"},
-    "daily_standing_charges": {"name": "Daily Standing Charges", "icon": "mdi:cash-clock", "device_class": SensorDeviceClass.MONETARY, "state_class": SensorStateClass.MEASUREMENT, "native_unit_of_measurement": "GBP", "data_key": "costs", "reading_key": "standing_charges_total"},
+    "daily_standing_charges": {"name": "Daily Standing Charges", "icon": "mdi:cash-clock", "device_class": SensorDeviceClass.MONETARY, "state_class": SensorStateClass.TOTAL, "native_unit_of_measurement": "GBP", "data_key": "costs", "reading_key": "standing_charges_total"},
 }
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
