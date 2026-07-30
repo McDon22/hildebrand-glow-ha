@@ -14,6 +14,11 @@ _LOGGER = logging.getLogger(__name__)
 # UK timezone for proper day boundaries
 UK_TZ = ZoneInfo("Europe/London")
 
+# The Glowmarkt API rejects daily/hourly-aggregated queries spanning more
+# than 31 days, so backfill history-discovery probes in chunks under that.
+CHUNK_PROBE_DAYS = 30
+CHUNK_PROBE_LIMIT = 24  # ~2 years of chunks before giving up
+
 @dataclass
 class DailyReading:
     """A single complete day's summed reading, plus its raw 30-min intervals.
@@ -205,25 +210,81 @@ class GlowmarktApiClient:
         _LOGGER.warning("No non-zero data found for %s in the last 3 days", resource_id)
         return None
 
-    async def get_recent_daily_readings(self, resource_id: str, num_days: int) -> list[DailyReading]:
-        """Fetch up to `num_days` most recent complete days, oldest first.
+    async def _find_data_start(self, resource_id: str) -> datetime | None:
+        """Find the earliest UK-local day this resource has real (non-zero)
+        data for.
 
-        Used for one-time backfill of accurate hourly statistics history.
-        Days the API has no/zero data for (e.g. before the meter was
-        commissioned) are skipped rather than failing the whole backfill.
+        Smart meters only have data from whenever the meter/account was
+        commissioned or linked, which varies wildly per user -- some
+        accounts have years of history, others just a couple of weeks.
+        Rather than guess a fixed backfill window, probe backwards in
+        ~30-day chunks (the API rejects wider daily/hourly ranges in a
+        single call) using the cheap per-day `function=sum` aggregate, and
+        stop once two consecutive chunks come back fully empty -- a strong
+        signal we've gone past where data starts. Capped at
+        CHUNK_PROBE_LIMIT chunks (~2 years) so a genuinely data-free
+        resource doesn't probe forever.
+        """
+        now_uk = datetime.now(UK_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        earliest: datetime | None = None
+        consecutive_empty = 0
+        for chunk in range(CHUNK_PROBE_LIMIT):
+            chunk_end_uk = now_uk - timedelta(days=chunk * CHUNK_PROBE_DAYS)
+            chunk_start_uk = chunk_end_uk - timedelta(days=CHUNK_PROBE_DAYS)
+            chunk_start_utc = chunk_start_uk.astimezone(timezone.utc)
+            chunk_end_utc = chunk_end_uk.astimezone(timezone.utc)
+            try:
+                async with self._session.get(
+                    f"{GLOWMARKT_API_BASE}/resource/{resource_id}/readings",
+                    headers=self._get_headers(),
+                    params={
+                        "from": chunk_start_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "to": chunk_end_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "period": "P1D",
+                        "offset": 0,
+                        "function": "sum"
+                    }
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+            except ClientError as err:
+                _LOGGER.error("Failed to probe %s (%s to %s): %s", resource_id, chunk_start_uk.date(), chunk_end_uk.date(), err)
+                break
+
+            rows = data.get("data", []) if data.get("status") == "OK" else []
+            nonzero = [r for r in rows if r[1] is not None and r[1] > 0]
+            _LOGGER.debug("Probed %s chunk %d (%s to %s): %d/%d non-zero", resource_id, chunk, chunk_start_uk.date(), chunk_end_uk.date(), len(nonzero), len(rows))
+            if nonzero:
+                earliest = datetime.fromtimestamp(min(r[0] for r in nonzero), tz=UK_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    break
+        return earliest
+
+    async def get_available_daily_readings(self, resource_id: str) -> list[DailyReading]:
+        """Fetch every complete day this resource has real data for, oldest
+        first -- however far back that turns out to be. Used for a one-time
+        backfill of accurate hourly statistics history on first setup.
         """
         await self._ensure_authenticated()
+
+        start_uk = await self._find_data_start(resource_id)
+        if start_uk is None:
+            return []
 
         now_uk = datetime.now(UK_TZ)
         today_start_uk = now_uk.replace(hour=0, minute=0, second=0, microsecond=0)
 
         readings: list[DailyReading] = []
-        for days_back in range(num_days, 0, -1):
-            day_start_uk = today_start_uk - timedelta(days=days_back)
-            day_end_uk = today_start_uk - timedelta(days=days_back - 1)
-            reading = await self._fetch_day_reading(resource_id, day_start_uk, day_end_uk, days_back)
+        day_start_uk = start_uk
+        while day_start_uk < today_start_uk:
+            day_end_uk = day_start_uk + timedelta(days=1)
+            reading = await self._fetch_day_reading(resource_id, day_start_uk, day_end_uk)
             if reading is not None:
                 readings.append(reading)
+            day_start_uk = day_end_uk
         return readings
 
     async def get_all_readings(self) -> dict[str, DailyReading | None]:
@@ -234,13 +295,13 @@ class GlowmarktApiClient:
             readings[classifier] = await self.get_daily_reading(resource["resource_id"])
         return readings
 
-    async def get_recent_readings(self, num_days: int) -> dict[str, list[DailyReading]]:
-        """Get the last `num_days` complete days for every discovered resource."""
+    async def get_available_readings(self) -> dict[str, list[DailyReading]]:
+        """Get every available day of history for each discovered resource."""
         if not self._resources:
             await self.discover_resources()
         result = {}
         for classifier, resource in self._resources.items():
-            result[classifier] = await self.get_recent_daily_readings(resource["resource_id"], num_days)
+            result[classifier] = await self.get_available_daily_readings(resource["resource_id"])
         return result
 
     @property

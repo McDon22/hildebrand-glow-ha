@@ -20,7 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 # persisted running counter (see _accumulate), not the raw daily value.
 CUMULATIVE_CLASSIFIERS = ("electricity.consumption", "gas.consumption")
 CUMULATIVE_STORAGE_VERSION = 1
-BACKFILL_DAYS = 7
 
 class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Glowmarkt data."""
@@ -105,16 +104,18 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return new_cumulative
 
     async def _async_backfill_history(self) -> None:
-        """One-time import of real hourly data for the last BACKFILL_DAYS
-        days, so existing Energy dashboard history looks right immediately
-        instead of only newly-arriving days getting the accurate breakdown.
+        """One-time import of every available day of real hourly data, so
+        existing Energy dashboard history looks right immediately instead of
+        only newly-arriving days getting the accurate breakdown. How far
+        back this reaches depends entirely on how much history Glowmarkt
+        actually has for the account (see api.get_available_daily_readings).
         """
         if self._cumulative is None:
             self._cumulative = await self._store.async_load() or {}
         if self._cumulative.get("_backfilled"):
             return
 
-        by_classifier = await self.api_client.get_recent_readings(BACKFILL_DAYS)
+        by_classifier = await self.api_client.get_available_readings()
         for classifier in CUMULATIVE_CLASSIFIERS:
             entity_id = self._entity_id_for(classifier)
             if entity_id is None:
@@ -146,7 +147,10 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._cumulative["_backfilled"] = True
         await self._store.async_save(self._cumulative)
-        _LOGGER.info("Backfilled %d days of hourly statistics history", BACKFILL_DAYS)
+        _LOGGER.info(
+            "Backfilled hourly statistics history: %s",
+            ", ".join(f"{c}={len(r)} day(s)" for c, r in by_classifier.items())
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
