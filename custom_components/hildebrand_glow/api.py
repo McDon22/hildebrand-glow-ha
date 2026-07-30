@@ -96,74 +96,92 @@ class GlowmarktApiClient:
         return self._resources
 
     async def get_daily_reading(self, resource_id: str) -> float | None:
-        """Get daily reading by fetching 30-min intervals and summing them."""
+        """Get the most recent complete day's reading by fetching 30-min
+        intervals and summing them.
+
+        Glowmarkt's API has a documented ~24-48h processing delay: the
+        "today" window always comes back as a run of zero-valued
+        placeholder readings, never real data. Querying only "today" (as
+        this used to do) therefore reports no data forever, not just until
+        data catches up -- this was the root cause of long-standing "No
+        data" reports. Walk backwards day by day (starting from yesterday,
+        UK-local) until a day with real non-zero data is found, since a
+        single day can occasionally still be incomplete.
+        """
         await self._ensure_authenticated()
-        
+
         # Use UK timezone for proper day boundaries
         now_uk = datetime.now(UK_TZ)
         today_start_uk = now_uk.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Convert to UTC for API call (API expects UTC)
-        today_start_utc = today_start_uk.astimezone(timezone.utc)
-        now_utc = now_uk.astimezone(timezone.utc)
-        
-        _LOGGER.debug(
-            "Fetching readings for %s from %s to %s (UK: %s to %s)",
-            resource_id,
-            today_start_utc.strftime("%Y-%m-%dT%H:%M:%S"),
-            now_utc.strftime("%Y-%m-%dT%H:%M:%S"),
-            today_start_uk.strftime("%Y-%m-%d %H:%M"),
-            now_uk.strftime("%H:%M")
-        )
-        
-        try:
-            # Fetch 30-minute interval data for today and sum it
+
+        for days_back in range(1, 4):
+            day_start_uk = today_start_uk - timedelta(days=days_back)
+            day_end_uk = today_start_uk - timedelta(days=days_back - 1)
+
+            # Convert to UTC for API call (API expects UTC)
+            day_start_utc = day_start_uk.astimezone(timezone.utc)
+            day_end_utc = day_end_uk.astimezone(timezone.utc)
+
             params = {
-                "from": today_start_utc.strftime("%Y-%m-%dT%H:%M:%S"),
-                "to": now_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                "from": day_start_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                "to": day_end_utc.strftime("%Y-%m-%dT%H:%M:%S"),
                 "period": "PT30M",
                 "offset": 0,
                 "function": "sum"
             }
-            _LOGGER.debug("API params: %s", params)
-            
-            async with self._session.get(
-                f"{GLOWMARKT_API_BASE}/resource/{resource_id}/readings",
-                headers=self._get_headers(),
-                params=params
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-                
-                _LOGGER.debug("API response status: %s, data points: %s", 
-                    data.get("status"), 
-                    len(data.get("data", [])) if data.get("data") else 0
-                )
-                
-                if data.get("status") == "OK" and data.get("data"):
-                    readings = data["data"]
-                    # Log each reading for debugging
-                    for reading in readings[-5:]:  # Log last 5 readings
-                        ts = datetime.fromtimestamp(reading[0], tz=UK_TZ).strftime("%H:%M")
-                        val = reading[1]
-                        _LOGGER.debug("  %s: %s kWh", ts, val)
-                    
-                    # Sum all the 30-minute readings
-                    total = sum(reading[1] for reading in readings if reading[1] is not None)
-                    _LOGGER.info("Resource %s: summed %d readings = %.3f kWh", 
-                        resource_id, len(readings), total)
-                    return round(total, 3)
-                else:
-                    _LOGGER.warning("No data returned for %s. Status: %s, Response: %s", 
-                        resource_id, data.get("status"), data)
-                    return None  # Return None instead of 0 when no data
-                    
-        except ClientResponseError as err:
-            _LOGGER.error("API error for %s: %s %s", resource_id, err.status, err.message)
-            return None
-        except ClientError as err:
-            _LOGGER.error("Failed to get reading for %s: %s", resource_id, err)
-            return None
+            _LOGGER.debug(
+                "Fetching readings for %s (%d day(s) back) from %s to %s (UK: %s to %s)",
+                resource_id, days_back,
+                params["from"], params["to"],
+                day_start_uk.strftime("%Y-%m-%d %H:%M"),
+                day_end_uk.strftime("%Y-%m-%d %H:%M")
+            )
+
+            try:
+                async with self._session.get(
+                    f"{GLOWMARKT_API_BASE}/resource/{resource_id}/readings",
+                    headers=self._get_headers(),
+                    params=params
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+
+                    _LOGGER.debug("API response status: %s, data points: %s",
+                        data.get("status"),
+                        len(data.get("data", [])) if data.get("data") else 0
+                    )
+
+                    if data.get("status") == "OK" and data.get("data"):
+                        readings = data["data"]
+                        # Log each reading for debugging
+                        for reading in readings[-5:]:  # Log last 5 readings
+                            ts = datetime.fromtimestamp(reading[0], tz=UK_TZ).strftime("%Y-%m-%d %H:%M")
+                            val = reading[1]
+                            _LOGGER.debug("  %s: %s kWh", ts, val)
+
+                        # Sum all the 30-minute readings
+                        total = sum(reading[1] for reading in readings if reading[1] is not None)
+                        if total > 0:
+                            _LOGGER.info("Resource %s: summed %d readings (%d day(s) back) = %.3f kWh",
+                                resource_id, len(readings), days_back, total)
+                            return round(total, 3)
+                        _LOGGER.debug(
+                            "Resource %s: %d day(s) back returned only zero-valued readings, trying earlier",
+                            resource_id, days_back
+                        )
+                    else:
+                        _LOGGER.warning("No data returned for %s (%d day(s) back). Status: %s, Response: %s",
+                            resource_id, days_back, data.get("status"), data)
+
+            except ClientResponseError as err:
+                _LOGGER.error("API error for %s (%d day(s) back): %s %s", resource_id, days_back, err.status, err.message)
+                return None
+            except ClientError as err:
+                _LOGGER.error("Failed to get reading for %s (%d day(s) back): %s", resource_id, days_back, err)
+                return None
+
+        _LOGGER.warning("No non-zero data found for %s in the last 3 days", resource_id)
+        return None
 
     async def get_all_readings(self) -> dict[str, float | None]:
         if not self._resources:
