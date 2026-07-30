@@ -1,8 +1,12 @@
 """Data update coordinator for Hildebrand Glow integration."""
 from __future__ import annotations
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from homeassistant.components.recorder.models import StatisticData, StatisticMeanType, StatisticMetaData
+from homeassistant.components.recorder.statistics import async_import_statistics
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .api import DailyReading, GlowmarktApiClient, GlowmarktApiError, GlowmarktAuthError
@@ -16,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 # persisted running counter (see _accumulate), not the raw daily value.
 CUMULATIVE_CLASSIFIERS = ("electricity.consumption", "gas.consumption")
 CUMULATIVE_STORAGE_VERSION = 1
+BACKFILL_DAYS = 7
 
 class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching Glowmarkt data."""
@@ -24,37 +29,131 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=DEFAULT_SCAN_INTERVAL)
         self.api_client = api_client
         self.tariff_config = tariff_config
+        self._entry_id = entry_id
         self._resources: dict[str, dict[str, Any]] = {}
         self._last_readings: dict[str, DailyReading] = {}  # Cache last known good readings
         self._store: Store = Store(hass, CUMULATIVE_STORAGE_VERSION, f"{DOMAIN}_{entry_id}_cumulative")
-        self._cumulative: dict[str, dict[str, Any]] | None = None
+        self._cumulative: dict[str, Any] | None = None
 
-    async def _accumulate(self, classifier: str, day: str, value: float) -> float:
-        """Add `value` to classifier's running total, once per distinct day.
+    def _entity_id_for(self, classifier: str) -> str | None:
+        registry = er.async_get(self.hass)
+        unique_id = f"{self._entry_id}_{classifier}"
+        return registry.async_get_entity_id("sensor", DOMAIN, unique_id)
 
-        Glowmarkt only ever hands us "the total for day X", never a
-        continuously-increasing meter reading, but state_class
-        total_increasing requires a genuine monotonic counter to behave
-        correctly on the Energy dashboard. We persist one here, keyed by
-        the UK-local day the value covers, and only add it the first time
-        that day is seen -- the coordinator polls every 5 minutes and would
-        otherwise re-add the same day's value on every poll until the
-        API's window rolls over to the next day.
+    @staticmethod
+    def _metadata_for(entity_id: str) -> StatisticMetaData:
+        return StatisticMetaData(
+            has_sum=True,
+            mean_type=StatisticMeanType.NONE,
+            name=None,
+            source="recorder",
+            statistic_id=entity_id,
+            unit_class=None,
+            unit_of_measurement="kWh",
+        )
+
+    def _import_hourly_statistics(self, entity_id: str, reading: DailyReading, baseline: float) -> float:
+        """Replace this entity's long-term stats for `reading`'s day with its
+        real hour-by-hour breakdown, instead of leaving whatever the normal
+        state-based compiler recorded there (a single lump on whichever hour
+        the coordinator happened to poll and notice the new day).
+
+        Returns the running cumulative total after this day, which becomes
+        the baseline for the next day.
+        """
+        hourly: dict[datetime, float] = {}
+        for ts, value in reading.intervals:
+            hour_start = ts.replace(minute=0, second=0, microsecond=0)
+            hourly[hour_start] = hourly.get(hour_start, 0.0) + value
+
+        running = baseline
+        stats: list[StatisticData] = []
+        for hour_start in sorted(hourly):
+            running += hourly[hour_start]
+            stats.append(StatisticData(start=hour_start, state=round(hourly[hour_start], 3), sum=round(running, 3)))
+
+        async_import_statistics(self.hass, self._metadata_for(entity_id), stats)
+        return round(running, 3)
+
+    async def _accumulate(self, classifier: str, reading: DailyReading) -> float:
+        """Add one day's reading to classifier's persisted running total,
+        importing its real hourly breakdown at the same time -- once per
+        distinct day, since the coordinator polls every 5 minutes and would
+        otherwise redo this on every poll until the API's window rolls over
+        to the next day.
         """
         if self._cumulative is None:
             self._cumulative = await self._store.async_load() or {}
 
         entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
-        if entry["day"] != day:
-            entry = {"day": day, "cumulative": entry["cumulative"] + value}
+        if entry["day"] == reading.day:
+            return entry["cumulative"]
+
+        entity_id = self._entity_id_for(classifier)
+        if entity_id is None:
+            # Entity not registered yet (e.g. the very first refresh, before
+            # platforms are forwarded) -- fall back to a plain add for now
+            # and let the hourly breakdown be corrected by the backfill pass
+            # once the entity exists.
+            _LOGGER.debug("No entity registered yet for %s, deferring hourly import", classifier)
+            new_cumulative = round(entry["cumulative"] + reading.value, 3)
+        else:
+            new_cumulative = self._import_hourly_statistics(entity_id, reading, entry["cumulative"])
+
+        self._cumulative[classifier] = {"day": reading.day, "cumulative": new_cumulative}
+        await self._store.async_save(self._cumulative)
+        return new_cumulative
+
+    async def _async_backfill_history(self) -> None:
+        """One-time import of real hourly data for the last BACKFILL_DAYS
+        days, so existing Energy dashboard history looks right immediately
+        instead of only newly-arriving days getting the accurate breakdown.
+        """
+        if self._cumulative is None:
+            self._cumulative = await self._store.async_load() or {}
+        if self._cumulative.get("_backfilled"):
+            return
+
+        by_classifier = await self.api_client.get_recent_readings(BACKFILL_DAYS)
+        for classifier in CUMULATIVE_CLASSIFIERS:
+            entity_id = self._entity_id_for(classifier)
+            if entity_id is None:
+                _LOGGER.debug("No entity registered yet for %s, deferring backfill", classifier)
+                return  # retry the whole backfill next poll, once entities exist
+
+            baseline = 0.0
+            entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
+            for reading in by_classifier.get(classifier, []):
+                baseline = self._import_hourly_statistics(entity_id, reading, baseline)
+                entry = {"day": reading.day, "cumulative": baseline}
             self._cumulative[classifier] = entry
-            await self._store.async_save(self._cumulative)
-        return entry["cumulative"]
+
+            # The normal state-based compiler may already have written stale
+            # values for today's hours so far (using whatever flat total the
+            # entity showed before this backfill raised its running total).
+            # Overwrite the whole of today-so-far with flat, zero-usage
+            # points at the corrected baseline, so the dashboard doesn't show
+            # a bogus dip/spike between the backfilled history and the
+            # currently-forming (not yet complete) day.
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+            hours_elapsed_today = int((current_hour - today_start).total_seconds() // 3600) + 1
+            gap_stats = [
+                StatisticData(start=today_start + timedelta(hours=h), state=0.0, sum=entry["cumulative"])
+                for h in range(hours_elapsed_today)
+            ]
+            async_import_statistics(self.hass, self._metadata_for(entity_id), gap_stats)
+
+        self._cumulative["_backfilled"] = True
+        await self._store.async_save(self._cumulative)
+        _LOGGER.info("Backfilled %d days of hourly statistics history", BACKFILL_DAYS)
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if not self._resources:
                 self._resources = await self.api_client.discover_resources()
+
+            await self._async_backfill_history()
 
             readings = await self.api_client.get_all_readings()
 
@@ -75,8 +174,7 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for classifier in CUMULATIVE_CLASSIFIERS:
                 reading = merged_readings.get(classifier)
                 cumulative_readings[classifier] = (
-                    await self._accumulate(classifier, reading.day, reading.value)
-                    if reading is not None else None
+                    await self._accumulate(classifier, reading) if reading is not None else None
                 )
 
             data: dict[str, Any] = {"readings": values, "cumulative_readings": cumulative_readings, "resources": self._resources, "costs": {}}
