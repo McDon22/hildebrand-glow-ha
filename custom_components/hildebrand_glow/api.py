@@ -1,6 +1,7 @@
 """Glowmarkt API client for Hildebrand Glow integration."""
 from __future__ import annotations
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -12,6 +13,19 @@ _LOGGER = logging.getLogger(__name__)
 
 # UK timezone for proper day boundaries
 UK_TZ = ZoneInfo("Europe/London")
+
+@dataclass
+class DailyReading:
+    """A single complete day's summed reading.
+
+    `day` identifies which UK-local calendar day (YYYY-MM-DD) `value`
+    covers. Callers that need a genuine running total (e.g. total_increasing
+    sensors feeding the Energy dashboard) use `day` to detect whether a
+    given day's value has already been accounted for, since polling
+    repeatedly within the same day must not add it again.
+    """
+    day: str
+    value: float
 
 class GlowmarktAuthError(Exception):
     """Exception for authentication errors."""
@@ -95,7 +109,7 @@ class GlowmarktApiClient:
                 _LOGGER.error("Failed to get resources for %s: %s", ve_id, err)
         return self._resources
 
-    async def get_daily_reading(self, resource_id: str) -> float | None:
+    async def get_daily_reading(self, resource_id: str) -> DailyReading | None:
         """Get the most recent complete day's reading by fetching 30-min
         intervals and summing them.
 
@@ -164,7 +178,7 @@ class GlowmarktApiClient:
                         if total > 0:
                             _LOGGER.info("Resource %s: summed %d readings (%d day(s) back) = %.3f kWh",
                                 resource_id, len(readings), days_back, total)
-                            return round(total, 3)
+                            return DailyReading(day=day_start_uk.date().isoformat(), value=round(total, 3))
                         _LOGGER.debug(
                             "Resource %s: %d day(s) back returned only zero-valued readings, trying earlier",
                             resource_id, days_back
@@ -183,7 +197,7 @@ class GlowmarktApiClient:
         _LOGGER.warning("No non-zero data found for %s in the last 3 days", resource_id)
         return None
 
-    async def get_all_readings(self) -> dict[str, float | None]:
+    async def get_all_readings(self) -> dict[str, DailyReading | None]:
         if not self._resources:
             await self.discover_resources()
         readings = {}

@@ -17,7 +17,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     client = GlowmarktApiClient(username=entry.data[CONF_USERNAME], password=entry.data[CONF_PASSWORD], session=session)
     tariff_config = {"electricity_rate": entry.data.get(CONF_ELECTRICITY_RATE, DEFAULT_ELECTRICITY_RATE), "gas_rate": entry.data.get(CONF_GAS_RATE, DEFAULT_GAS_RATE), "electricity_standing_charge": entry.data.get(CONF_ELECTRICITY_STANDING_CHARGE, DEFAULT_ELECTRICITY_STANDING_CHARGE), "gas_standing_charge": entry.data.get(CONF_GAS_STANDING_CHARGE, DEFAULT_GAS_STANDING_CHARGE)}
-    coordinator = GlowmarktDataUpdateCoordinator(hass=hass, api_client=client, tariff_config=tariff_config)
+    coordinator = GlowmarktDataUpdateCoordinator(hass=hass, api_client=client, tariff_config=tariff_config, entry_id=entry.entry_id)
     await coordinator.async_config_entry_first_refresh()
     hass.data[DOMAIN][entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
