@@ -295,12 +295,21 @@ class GlowmarktApiClient:
             readings[classifier] = await self.get_daily_reading(resource["resource_id"])
         return readings
 
-    async def get_available_readings(self) -> dict[str, list[DailyReading]]:
-        """Get every available day of history for each discovered resource."""
+    async def get_available_readings(self, classifiers: set[str] | None = None) -> dict[str, list[DailyReading]]:
+        """Get every available day of history for each discovered resource.
+
+        `classifiers` restricts this to a subset (e.g. just the consumption
+        classifiers backfill actually needs) -- without it, this would also
+        walk the full history of cost resources nobody asked for, which can
+        be needlessly slow (one account seen with real cost-resource data
+        going back over 9 months, vs. under 2 weeks of consumption data).
+        """
         if not self._resources:
             await self.discover_resources()
         result = {}
         for classifier, resource in self._resources.items():
+            if classifiers is not None and classifier not in classifiers:
+                continue
             result[classifier] = await self.get_available_daily_readings(resource["resource_id"])
         return result
 

@@ -1,5 +1,6 @@
 """Data update coordinator for Hildebrand Glow integration."""
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +34,8 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_readings: dict[str, DailyReading] = {}  # Cache last known good readings
         self._store: Store = Store(hass, CUMULATIVE_STORAGE_VERSION, f"{DOMAIN}_{entry_id}_cumulative")
         self._cumulative: dict[str, Any] | None = None
+        self._cumulative_lock = asyncio.Lock()
+        self._backfill_started = False
 
     def _entity_id_for(self, classifier: str) -> str | None:
         registry = er.async_get(self.hass)
@@ -80,28 +83,32 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         distinct day, since the coordinator polls every 5 minutes and would
         otherwise redo this on every poll until the API's window rolls over
         to the next day.
+
+        Guarded by _cumulative_lock since backfill (see below) mutates the
+        same persisted dict concurrently, in a background task.
         """
-        if self._cumulative is None:
-            self._cumulative = await self._store.async_load() or {}
+        async with self._cumulative_lock:
+            if self._cumulative is None:
+                self._cumulative = await self._store.async_load() or {}
 
-        entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
-        if entry["day"] == reading.day:
-            return entry["cumulative"]
+            entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
+            if entry["day"] == reading.day:
+                return entry["cumulative"]
 
-        entity_id = self._entity_id_for(classifier)
-        if entity_id is None:
-            # Entity not registered yet (e.g. the very first refresh, before
-            # platforms are forwarded) -- fall back to a plain add for now
-            # and let the hourly breakdown be corrected by the backfill pass
-            # once the entity exists.
-            _LOGGER.debug("No entity registered yet for %s, deferring hourly import", classifier)
-            new_cumulative = round(entry["cumulative"] + reading.value, 3)
-        else:
-            new_cumulative = self._import_hourly_statistics(entity_id, reading, entry["cumulative"])
+            entity_id = self._entity_id_for(classifier)
+            if entity_id is None:
+                # Entity not registered yet (e.g. the very first refresh,
+                # before platforms are forwarded) -- fall back to a plain
+                # add for now and let the hourly breakdown be corrected by
+                # the backfill pass once the entity exists.
+                _LOGGER.debug("No entity registered yet for %s, deferring hourly import", classifier)
+                new_cumulative = round(entry["cumulative"] + reading.value, 3)
+            else:
+                new_cumulative = self._import_hourly_statistics(entity_id, reading, entry["cumulative"])
 
-        self._cumulative[classifier] = {"day": reading.day, "cumulative": new_cumulative}
-        await self._store.async_save(self._cumulative)
-        return new_cumulative
+            self._cumulative[classifier] = {"day": reading.day, "cumulative": new_cumulative}
+            await self._store.async_save(self._cumulative)
+            return new_cumulative
 
     async def _async_backfill_history(self) -> None:
         """One-time import of every available day of real hourly data, so
@@ -109,55 +116,73 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         only newly-arriving days getting the accurate breakdown. How far
         back this reaches depends entirely on how much history Glowmarkt
         actually has for the account (see api.get_available_daily_readings).
+
+        Runs as a background task (see _async_update_data) rather than
+        blocking the coordinator's first refresh: how much history exists
+        varies wildly per account, and blocking HA's startup on possibly
+        many months of day-by-day API calls would be a bad experience for
+        anyone whose account has more history than this was tested against.
         """
-        if self._cumulative is None:
-            self._cumulative = await self._store.async_load() or {}
-        if self._cumulative.get("_backfilled"):
-            return
+        async with self._cumulative_lock:
+            if self._cumulative is None:
+                self._cumulative = await self._store.async_load() or {}
+            if self._cumulative.get("_backfilled"):
+                return
 
-        by_classifier = await self.api_client.get_available_readings()
-        for classifier in CUMULATIVE_CLASSIFIERS:
-            entity_id = self._entity_id_for(classifier)
-            if entity_id is None:
-                _LOGGER.debug("No entity registered yet for %s, deferring backfill", classifier)
-                return  # retry the whole backfill next poll, once entities exist
+        # Only the two consumption classifiers feed total_increasing
+        # sensors and need this -- restricting to them (rather than every
+        # discovered resource) avoids also walking the full history of
+        # unrelated cost resources, which can be far longer and needlessly
+        # slow (one account seen with real cost data going back over 9
+        # months, vs. under 2 weeks of consumption data).
+        by_classifier = await self.api_client.get_available_readings(set(CUMULATIVE_CLASSIFIERS))
 
-            baseline = 0.0
-            entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
-            for reading in by_classifier.get(classifier, []):
-                baseline = self._import_hourly_statistics(entity_id, reading, baseline)
-                entry = {"day": reading.day, "cumulative": baseline}
-            self._cumulative[classifier] = entry
+        async with self._cumulative_lock:
+            for classifier in CUMULATIVE_CLASSIFIERS:
+                entity_id = self._entity_id_for(classifier)
+                if entity_id is None:
+                    _LOGGER.debug("No entity registered yet for %s, deferring backfill", classifier)
+                    return  # retry the whole backfill next poll, once entities exist
 
-            # The normal state-based compiler may already have written stale
-            # values for today's hours so far (using whatever flat total the
-            # entity showed before this backfill raised its running total).
-            # Overwrite the whole of today-so-far with flat, zero-usage
-            # points at the corrected baseline, so the dashboard doesn't show
-            # a bogus dip/spike between the backfilled history and the
-            # currently-forming (not yet complete) day.
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-            hours_elapsed_today = int((current_hour - today_start).total_seconds() // 3600) + 1
-            gap_stats = [
-                StatisticData(start=today_start + timedelta(hours=h), state=0.0, sum=entry["cumulative"])
-                for h in range(hours_elapsed_today)
-            ]
-            async_import_statistics(self.hass, self._metadata_for(entity_id), gap_stats)
+                baseline = 0.0
+                entry = self._cumulative.get(classifier, {"day": None, "cumulative": 0.0})
+                for reading in by_classifier.get(classifier, []):
+                    baseline = self._import_hourly_statistics(entity_id, reading, baseline)
+                    entry = {"day": reading.day, "cumulative": baseline}
+                self._cumulative[classifier] = entry
 
-        self._cumulative["_backfilled"] = True
-        await self._store.async_save(self._cumulative)
-        _LOGGER.info(
-            "Backfilled hourly statistics history: %s",
-            ", ".join(f"{c}={len(r)} day(s)" for c, r in by_classifier.items())
-        )
+                # The normal state-based compiler may already have written
+                # stale values for today's hours so far (using whatever flat
+                # total the entity showed before this backfill raised its
+                # running total). Overwrite the whole of today-so-far with
+                # flat, zero-usage points at the corrected baseline, so the
+                # dashboard doesn't show a bogus dip/spike between the
+                # backfilled history and the currently-forming (not yet
+                # complete) day.
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                hours_elapsed_today = int((current_hour - today_start).total_seconds() // 3600) + 1
+                gap_stats = [
+                    StatisticData(start=today_start + timedelta(hours=h), state=0.0, sum=entry["cumulative"])
+                    for h in range(hours_elapsed_today)
+                ]
+                async_import_statistics(self.hass, self._metadata_for(entity_id), gap_stats)
+
+            self._cumulative["_backfilled"] = True
+            await self._store.async_save(self._cumulative)
+            _LOGGER.info(
+                "Backfilled hourly statistics history: %s",
+                ", ".join(f"{c}={len(r)} day(s)" for c, r in by_classifier.items())
+            )
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if not self._resources:
                 self._resources = await self.api_client.discover_resources()
 
-            await self._async_backfill_history()
+            if not self._backfill_started:
+                self._backfill_started = True
+                self.hass.async_create_task(self._async_backfill_history(), name=f"{DOMAIN} history backfill")
 
             readings = await self.api_client.get_all_readings()
 
